@@ -248,6 +248,7 @@ class TrueType implements ProcessorInterface
         $this->getPostData();
         $this->getHheaData();
         $this->getCIDToGIDMap();
+        $this->getVariationSequences();
         $this->getHeights();
         $this->getWidths();
     }
@@ -1136,6 +1137,14 @@ class TrueType implements ProcessorInterface
         }
 
         $this->fdt['MissingWidth'] = $chw[0] ?? 0;
+        $this->fdt['variationwidths'] = [];
+        foreach ($this->fdt['variations'] ?? [] as $mappings) {
+            foreach ($mappings as $gid) {
+                if ($gid >= 0 && isset($chw[$gid])) {
+                    $this->fdt['variationwidths'][$gid] = $chw[$gid];
+                }
+            }
+        }
         $this->fdt['cw'] = [];
         $this->fdt['cbbox'] = [];
         // ctgdata is built in ascending CID order, so cw and cbbox are filled in the same order
@@ -1295,6 +1304,26 @@ class TrueType implements ProcessorInterface
         }
 
         $this->fdt['type'] = 'TrueType';
+    }
+
+    /** Read format 14 in addition to the selected nominal cmap. */
+    protected function getVariationSequences(): void
+    {
+        $this->fdt['variations'] = [];
+        $table = $this->findTableEntry(0, 5);
+        if ($table === null) {
+            return;
+        }
+        $offset = $this->fdt['table']['cmap']['offset'] + $table['offset'];
+        if (($offset + 10) > $this->getCmapEnd()) {
+            throw new FontException('Truncated cmap format 14 header');
+        }
+        $length = $this->fbyte->getULong($offset + 2);
+        if ($length < 10 || $length > ($this->getCmapEnd() - $offset)) {
+            throw new FontException('Invalid cmap format 14 length');
+        }
+        $reader = new VariationSequences(\substr($this->font, $offset, $length), $this->fdt['numGlyphs']);
+        $this->fdt['variations'] = $reader->read();
     }
 
     /**

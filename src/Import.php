@@ -485,6 +485,10 @@ class Import
         $pfile .= self::getBBoxMapJson('cbboxu', $this->fdt['cbboxu']);
         $pfile .= self::getWidthMapJson('cw', $this->fdt['cw']);
         $pfile .= self::getWidthMapJson('cwu', $this->fdt['cwu']);
+        $pfile .= self::getWidthMapJson('variationwidths', $this->fdt['variationwidths'] ?? []);
+        if (($this->fdt['variations'] ?? []) !== []) {
+            $pfile .= ',"variations":' . \json_encode($this->fdt['variations'], JSON_THROW_ON_ERROR);
+        }
 
         $pfile .= '}' . "\n";
 

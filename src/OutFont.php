@@ -282,17 +282,14 @@ abstract class OutFont extends \Com\Tecnick\Pdf\Font\OutUtil
             . ' /Supplement '
             . $fontcidinfo['Supplement'];
         $out .=
-            ' /CIDSystemInfo << '
-            . $cidinfo
-            . ' >>'
-            . ' /FontDescriptor '
-            . ($this->pon + 1)
-            . ' 0 R'
-            . ' /DW '
-            . $fontdw
-            . "\n"
-            . ($font['gidenc'] ? $this->getGidWidths($font) : $this->getCharWidths($font, 0));
-        if ($font['gidenc']) {
+            ' /CIDSystemInfo << ' . $cidinfo . ' >>' . ' /FontDescriptor ' . (
+                $this->pon + 1
+            ) . ' 0 R' . ' /DW ' . $fontdw . "\n" . match (true) {
+                ($font['variations'] ?? []) !== [] => $this->getSequenceWidths($font),
+                $font['gidenc'] => $this->getGidWidths($font),
+                default => $this->getCharWidths($font, 0),
+            };
+        if ($font['gidenc'] && ($font['variations'] ?? []) === []) {
             // the character codes are the glyph indices themselves
             $out .= "\n" . '/CIDToGIDMap /Identity';
         } elseif ($fontctg !== '') {
@@ -315,10 +312,14 @@ abstract class OutFont extends \Com\Tecnick\Pdf\Font\OutUtil
 
         $out .= ' >>' . "\n" . 'endobj' . "\n";
 
-        if ($fontctg !== '' && !$font['gidenc']) {
+        if ($fontctg !== '' && (!$font['gidenc'] || ($font['variations'] ?? []) !== [])) {
             $out .= ++$this->pon . ' 0 obj' . "\n";
             // embed the CIDToGIDMap: the mapping from CIDs to glyph indices
             $ctgfile = \strtolower($fontctg);
+            if (($font['variations'] ?? []) !== []) {
+                $out .= $this->getSequenceMapStream($font);
+                return $out;
+            }
             $fontfile = $this->getFontFullPath($fontdir, $ctgfile);
             $content = $this->fileHelper->getLocalFileData($fontfile);
             if ($content === false) {
@@ -373,16 +374,56 @@ abstract class OutFont extends \Com\Tecnick\Pdf\Font\OutUtil
             . "\n";
 
         // a bfchar section holds at most 100 entries
-        foreach (\array_chunk($usedgid, 100, true) as $chunk) {
+        $sequences = [];
+        foreach ($usedgid as $gid => $ord) {
+            $sequences[$gid] = $this->getUtf16beHex($ord);
+        }
+        if (($font['variations'] ?? []) !== []) {
+            $sequences = [];
+            foreach ($font['encodedglyphs'] as $cid => $entry) {
+                $sequences[$cid] = \implode('', \array_map($this->getUtf16beHex(...), $entry['unicode']));
+            }
+        }
+        foreach (\array_chunk($sequences, 100, true) as $chunk) {
             $out .= \count($chunk) . ' beginbfchar' . "\n";
-            foreach ($chunk as $gid => $ord) {
-                $out .= \sprintf("<%04x> <%s>\n", $gid, $this->getUtf16beHex((int) $ord));
+            foreach ($chunk as $gid => $unicode) {
+                $out .= \sprintf("<%04x> <%s>\n", $gid, $unicode);
             }
 
             $out .= 'endbfchar' . "\n";
         }
 
         return $out . 'endcmap' . "\n" . 'CMapName currentdict /CMap defineresource pop' . "\n" . 'end' . "\n" . 'end';
+    }
+
+    /** @param TFontData $font */
+    private function getSequenceWidths(array $font): string
+    {
+        $widths = [];
+        foreach ($font['encodedglyphs'] as $cid => $entry) {
+            $widths[$cid] =
+                $font['variationwidths'][$entry['gid']]
+                ?? $font['cwu'][$entry['unicode'][0]]
+                ?? $font['cw'][$entry['unicode'][0]]
+                ?? $font['dw'];
+        }
+        return $this->formatWidthRanges($this->buildWidthRanges($widths, $font['dw']));
+    }
+
+    /** @param TFontData $font */
+    private function getSequenceMapStream(array $font): string
+    {
+        $map = "\x00\x00";
+        foreach ($font['encodedglyphs'] as $entry) {
+            $map .= \pack('n', $entry['gid']);
+        }
+        $filter = '';
+        if ($font['compress']) {
+            $map = Zlib::compress($map, 'Unable to compress variation CIDToGIDMap');
+            $filter = ' /Filter /FlateDecode';
+        }
+        $stream = $this->enc->encryptString($map, $this->pon);
+        return '<< /Length ' . \strlen($stream) . $filter . ' >> stream' . "\n" . $stream . "\nendstream\nendobj\n";
     }
 
     /**
