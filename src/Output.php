@@ -53,6 +53,9 @@ class Output extends \Com\Tecnick\Pdf\Font\OutFont
      */
     protected array $subchars = [];
 
+    /** @var array<string, array<int, bool>> Selected glyphs aggregated per font program. */
+    protected array $subglyphs = [];
+
     /**
      * Effective subset flag for each font file, keyed like $subchars.
      *
@@ -202,6 +205,10 @@ class Output extends \Com\Tecnick\Pdf\Font\OutFont
                 $this->filesubset[$file_key] = ($this->filesubset[$file_key] ?? true) && $font['subset'];
                 // only the enabled entries are collected, as they are tested with isset()
                 $this->subchars[$file_key] ??= [];
+                $this->subglyphs[$file_key] ??= [];
+                foreach ($font['encodedglyphs'] as $entry) {
+                    $this->subglyphs[$file_key][$entry['gid']] = true;
+                }
                 foreach ($font['subsetchars'] as $cid => $enabled) {
                     if (!$enabled) {
                         continue;
@@ -276,11 +283,14 @@ class Output extends \Com\Tecnick\Pdf\Font\OutFont
                     $subsetFont = null;
                     if ($cache !== null) {
                         $cacheKey = $this->subsetCacheKey($font_data, $font, $subchars);
+                        $glyphs = $this->subglyphs[$dkey];
+                        \ksort($glyphs);
+                        $cacheKey .= ':' . \hash('xxh128', \implode(',', \array_keys($glyphs)));
                         $subsetFont = $cache->get($cacheKey);
                     }
 
                     if ($subsetFont === null) {
-                        $sub = new Subset($font_data, $font, $this->fileHelper, $subchars);
+                        $sub = new Subset($font_data, $font, $this->fileHelper, $subchars, $this->subglyphs[$dkey]);
                         $subsetFont = $sub->getSubsetFont();
                         $cache?->set($cacheKey, $subsetFont);
                     }

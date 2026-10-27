@@ -94,12 +94,46 @@ final class Definition
             'mode' => self::mode($value),
             'FontBBox' => self::numberList($value),
             'cbbox', 'cbboxu' => self::bboxMap($value),
-            'cw', 'cwu', 'ctgu', 'ctgdata', 'indexToLoc', 'usedgid' => self::numberMap($value),
+            'cw', 'cwu', 'ctgu', 'ctgdata', 'indexToLoc', 'usedgid', 'variationwidths' => self::numberMap($value),
+            'variations' => self::variationMap($value),
             'subsetchars' => self::flagMap($value),
             'enc_map' => self::textMap($value),
             // 'table' and 'encodingTables' belong to the import stage, not to a definition file
             default => null,
         };
+    }
+
+    /**
+     * @param array<array-key, mixed> $value
+     * @return array<int, array<int, int>>
+     */
+    private static function variationMap(array $value): array
+    {
+        $map = [];
+        /** @var mixed $mappings */
+        foreach ($value as $selector => $mappings) {
+            $code = self::code($selector);
+            if ($code === null || !Import\VariationSequences::isSelector($code) || !\is_array($mappings)) {
+                throw new Exception('Invalid variation selector in the font definition');
+            }
+            /** @var mixed $gid */
+            foreach ($mappings as $base => $gid) {
+                $ord = self::code($base);
+                if (
+                    $ord === null
+                    || $ord < 0
+                    || $ord > 0x10_FFFF
+                    || $ord >= 0xD800 && $ord <= 0xDFFF
+                    || !\is_int($gid)
+                    || $gid < -1
+                    || $gid > 0xFFFF
+                ) {
+                    throw new Exception('Invalid variation mapping in the font definition');
+                }
+                $map[$code][$ord] = $gid;
+            }
+        }
+        return $map;
     }
 
     /**

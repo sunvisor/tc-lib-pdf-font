@@ -36,6 +36,7 @@ It handles font metrics, encodings, and font program references, turning static 
 - Import support for core, Type1, and TrueType sources
 - Font metadata extraction and normalization
 - Utilities for subset and output dictionary generation
+- Unicode variation sequences from TrueType `cmap` format 14, including Japanese IVS (this fork)
 - Optional injectable cache to reuse computed TrueType font subsets
 
 ### Runtime Font Stack
@@ -83,7 +84,9 @@ For larger examples, refer to `test/OutputTest.php` and the conversion tooling i
 
 A `TrueTypeUnicode` font is emitted as a composite (Type0) font with the `Identity-H` encoding, so every character code in a content stream is 2 bytes wide.
 
-The character code is the glyph index of the font (`CID == GID`): the font dictionary declares `/CIDToGIDMap /Identity`, the `/W` array is keyed by glyph index, and a `/ToUnicode` CMap is generated for the glyphs used by the document so that the text stays searchable and extractable.
+For fonts without variation mappings, the character code is the glyph index of the font (`CID == GID`): the font dictionary declares `/CIDToGIDMap /Identity`, the `/W` array is keyed by glyph index, and a `/ToUnicode` CMap is generated for the glyphs used by the document so that the text stays searchable and extractable.
+
+For fonts with variation mappings, this fork assigns a separate CID to each distinct input character or variation sequence. An explicit `/CIDToGIDMap` selects the glyph, while `/ToUnicode` preserves the original sequence. A plain character and an IVS can therefore use the same glyph without losing their distinct text values.
 
 ### Encoding a string
 
@@ -94,7 +97,7 @@ $stack = new \Com\Tecnick\Pdf\Font\Stack(1.0);
 $stack->insert($objnum, 'dejavusans', '', 12);
 
 if ($stack->isCurrentGidEncoded()) {
-    // 2-byte big-endian glyph indices, and the glyphs are recorded on the font
+    // 2-byte PDF character codes; the glyphs and source text are recorded
     $codes = $stack->ordArrToGidStr([0x41, 0x20, 0x1D703]);
 } else {
     // CID-0 fonts keep the UTF-16BE encoding expected by their predefined CMap
@@ -102,13 +105,15 @@ if ($stack->isCurrentGidEncoded()) {
 }
 ```
 
-The text object written to the page must also select the font the string was encoded with, otherwise the glyph indices are resolved against a different font. This does not apply to the fonts that are not GID encoded, whose character codes mean the same thing in every font.
+The text object written to the page must also select the font the string was encoded with, otherwise the character codes are resolved against a different font. Do not assume that a returned character code is always a glyph index.
 
 Relevant methods:
 
-- `Stack::isCurrentGidEncoded()`: true when the current font encodes text as glyph indices.
-- `Stack::ordArrToGidStr(array $uniarr)`: encodes codepoints as 2-byte glyph indices and records them.
+- `Stack::isCurrentGidEncoded()`: selects the font-stack encoding path for a composite font; this also returns true for fonts with variation mappings.
+- `Stack::ordArrToGidStr(array $uniarr)`: encodes codepoints as 2-byte PDF character codes and records their glyphs and source text.
 - `Stack::getGidForOrd(int $ord)`: glyph index of a codepoint, `0` when the font has no glyph for it.
+- `Stack::getGidForVariation(int $base, int $selector)`: resolves a variation sequence; returns `null` for an unsupported sequence and `0` for a missing glyph.
+- `Stack::getVariationWidth(int $base, int $selector)`: returns the selected glyph's scaled advance, falling back to the base character's width for an unsupported sequence.
 - `Buffer::addUsedGid(string $key, int $gid, int $ord)`: records a glyph and the codepoint it was encoded from.
 
 ### Font definition files
@@ -122,6 +127,43 @@ Codepoints above U+FFFF do not fit that table and are stored in the definition f
 ```
 
 That key is only written when the font is converted with `--encoding_id=10`, which selects the format 12 cmap subtable.
+
+---
+
+## IVS Support in This Fork
+
+This fork reads the supplementary `cmap` format 14 table alongside the nominal character map. It supports both default variation sequences (the base character's normal glyph) and non-default sequences (a different glyph). Use it together with the IVS-enabled `tc-lib-pdf` fork for text layout and PDF generation; the standard installation instructions above do not select these forks automatically.
+
+### Prepare an IVS font
+
+Convert a TrueType font that contains the required variation mappings, such as IPAmj Mincho:
+
+```sh
+mkdir -p target/fonts/ivs
+php util/convert.php \
+    --outpath=./target/fonts/ivs/ \
+    --type=TrueTypeUnicode \
+    --flags=32 \
+    --encoding_id=10 \
+    --fonts=/path/to/ipamjm.ttf
+```
+
+`--encoding_id=10` selects the nominal format 12 map. Format 14 is read in addition to it; do not select format 14 as the nominal map. The generated definition includes `variations` and `variationwidths`. Keep the `.json`, `.ctg.z`, and font program `.z` files together.
+
+Definitions generated before this change must be regenerated to gain IVS support. The converter refuses to overwrite an existing definition, so use an empty output directory or back up the existing artifacts first. The original font file does not need modification.
+
+### Runtime behavior
+
+- A base character followed by a variation selector is encoded as one PDF character code and one glyph.
+- Width measurement uses the selected glyph's advance. The selector adds no advance or letter spacing.
+- The selected glyphs, including those absent from the nominal map, are retained in embedded subsets. Full-font embedding is also supported.
+- The PDF's `/ToUnicode` map retains the original base-plus-selector sequence, including default sequences that share a glyph with the plain character.
+- An unsupported sequence uses the base character's glyph. With a converted font that has variation mappings, its original sequence is still recorded for text extraction. An isolated selector is not rendered.
+- A font with variation mappings can encode at most 65,535 distinct input characters or sequences in one PDF font resource. Exceeding this limit throws an exception.
+
+The implementation recognizes selectors U+FE00-U+FE0F and U+E0100-U+E01EF. It provides variation-glyph selection, not a general OpenType shaping engine.
+
+Verification covers all 11 sequences registered for U+908A and both sequences registered for U+658E in IPAmj Mincho Ver.006.01, plus malformed format 14 data, glyph resolution, encoding, and width handling. The font is not bundled with this repository.
 
 ---
 
@@ -158,7 +200,7 @@ $output = new \Com\Tecnick\Pdf\Font\Output(
 When no cache is supplied (the default), every subset is recomputed. The
 library never evicts entries: the injected backend owns expiration and size
 limits. The cache key accounts for the font program bytes, the cmap-selection
-metrics, and the requested subset characters, so distinct inputs never collide.
+metrics, the requested subset characters, and explicitly selected variation glyphs.
 
 ### Using a PSR-16 cache
 
@@ -275,13 +317,13 @@ Version 4.0 changes the character codes emitted for `TrueTypeUnicode` fonts from
 A consumer of this library must be updated together with it:
 
 - Encode composite text with `Stack::ordArrToGidStr()` instead of writing UTF-16BE codepoints, and make the text object select the font the string was encoded with. A consumer that keeps writing codepoints produces PDFs whose text renders as unrelated glyphs, with no error raised.
-- A `TrueTypeUnicode` font emits one PDF object less, since the `CIDToGIDMap` stream is not embedded any more. Baselines that compare PDF output byte by byte, or that assert on object numbers, must be regenerated.
+- A `TrueTypeUnicode` font without variation mappings emits one PDF object less, since its `CIDToGIDMap` stream is not embedded. This fork retains an explicit mapping stream for fonts with variation mappings. Baselines that compare PDF output byte by byte, or that assert on object numbers, must be regenerated.
 - The `TFontData` shape gained the `ctgu`, `gidenc` and `usedgid` keys. Code that builds that array must add them.
 
 Unchanged:
 
 - No method was removed or changed signature. The new members are additions.
-- Font definition files and `.ctg.z` artifacts generated by 3.x keep working for the whole Basic Multilingual Plane. Regenerate a font only to gain the characters above U+FFFF, with `--encoding_id=10`.
+- Font definition files and `.ctg.z` artifacts generated by 3.x keep working for the whole Basic Multilingual Plane. Regenerate a font to gain characters above U+FFFF or IVS mappings, with `--encoding_id=10`.
 - The output of `Core`, `TrueType`, `Type1` and `cidfont0` fonts is unchanged.
 
 ---
